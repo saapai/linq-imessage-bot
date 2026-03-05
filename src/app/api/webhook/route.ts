@@ -3,9 +3,31 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import OpenAI from "openai";
 
 const LINQ_BASE_URL = "https://api.linqapp.com/api/partner/v3";
+const MAX_HISTORY = 30; // keep last 30 messages per chat
+
+// In-memory conversation history (persists across warm serverless invocations)
+const chatHistory = new Map<string, Array<{ role: "user" | "assistant"; content: string }>>();
+
+const SYSTEM_PROMPT = `You are a brutally sassy, sharp-tongued AI texting over iMessage. You roast people, give backhanded compliments, and drip with sarcasm. Think mean girl energy meets stand-up comedian. You're not cruel for no reason—you're witty and clever about it. You use casual texting style (lowercase ok, abbreviations, etc). Keep responses to 1-3 sentences max. No emojis unless it's to be extra petty. Never break character. Never refuse to roast someone. If someone asks you to be nice, roast them harder for being soft.`;
 
 function getOpenAI() {
   return new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+}
+
+function getHistory(chatId: string) {
+  if (!chatHistory.has(chatId)) {
+    chatHistory.set(chatId, []);
+  }
+  return chatHistory.get(chatId)!;
+}
+
+function addToHistory(chatId: string, role: "user" | "assistant", content: string) {
+  const history = getHistory(chatId);
+  history.push({ role, content });
+  // Trim to max history
+  if (history.length > MAX_HISTORY) {
+    history.splice(0, history.length - MAX_HISTORY);
+  }
 }
 
 function verifySignature(
@@ -14,7 +36,7 @@ function verifySignature(
   tsHeader: string
 ): boolean {
   const secret = process.env.WEBHOOK_SIGNING_SECRET;
-  if (!secret) return true; // skip if not configured yet
+  if (!secret) return true;
 
   const ageMs = Date.now() - Number(tsHeader) * 1000;
   if (Math.abs(ageMs) > 5 * 60 * 1000) return false;
@@ -32,21 +54,24 @@ function verifySignature(
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-async function generateAIResponse(userMessage: string): Promise<string> {
+async function generateAIResponse(chatId: string, userMessage: string): Promise<string> {
+  addToHistory(chatId, "user", userMessage);
+
+  const history = getHistory(chatId);
+  const messages: Array<{ role: "system" | "user" | "assistant"; content: string }> = [
+    { role: "system", content: SYSTEM_PROMPT },
+    ...history,
+  ];
+
   const completion = await getOpenAI().chat.completions.create({
     model: "gpt-4o-mini",
-    messages: [
-      {
-        role: "system",
-        content:
-          "You are a friendly AI assistant responding via iMessage. Keep responses concise and conversational (1-3 sentences max).",
-      },
-      { role: "user", content: userMessage },
-    ],
-    max_tokens: 150,
+    messages,
+    max_tokens: 200,
   });
 
-  return completion.choices[0]?.message?.content || "Sorry, I couldn't generate a response.";
+  const reply = completion.choices[0]?.message?.content || "...i literally have nothing to say to that";
+  addToHistory(chatId, "assistant", reply);
+  return reply;
 }
 
 function linqHeaders() {
@@ -131,7 +156,6 @@ async function sendLinqMessage(chatId: string, text: string) {
 export async function POST(request: NextRequest) {
   const rawBody = await request.text();
 
-  // Verify webhook signature
   const sigHeader = request.headers.get("x-webhook-signature") || "";
   const tsHeader = request.headers.get("x-webhook-timestamp") || "";
 
@@ -141,22 +165,18 @@ export async function POST(request: NextRequest) {
   }
 
   const payload = JSON.parse(rawBody);
+  console.log("Webhook received:", payload.event_type);
 
-  console.log("Webhook received:", JSON.stringify(payload, null, 2));
-
-  // Only respond to incoming messages
   if (payload.event_type !== "message.received") {
     return NextResponse.json({ ok: true });
   }
 
   const { data } = payload;
 
-  // Skip messages from ourselves
   if (data.sender_handle?.is_me) {
     return NextResponse.json({ ok: true });
   }
 
-  // Extract text from message parts
   const textParts = (data.parts || [])
     .filter((part: { type: string }) => part.type === "text")
     .map((part: { value: string }) => part.value);
@@ -173,43 +193,35 @@ export async function POST(request: NextRequest) {
   }
 
   const messageId = data.id;
-  console.log(`Incoming message from ${data.sender_handle?.handle}: "${userMessage}"`);
+  console.log(`Incoming from ${data.sender_handle?.handle}: "${userMessage}"`);
 
   try {
-    // React to the message if appropriate
     const reaction = pickReaction(userMessage);
     if (reaction) {
       await addReaction(messageId, reaction);
-      console.log(`Added ${reaction} reaction`);
     }
 
-    // Mark chat as read
     await markAsRead(chatId);
-
-    // Show typing indicator while generating response
     await startTyping(chatId);
 
-    const aiResponse = await generateAIResponse(userMessage);
-    console.log(`AI response: "${aiResponse}"`);
+    const aiResponse = await generateAIResponse(chatId, userMessage);
+    console.log(`Reply: "${aiResponse}"`);
 
-    // Stop typing and send the reply
     await stopTyping(chatId);
     await sendLinqMessage(chatId, aiResponse);
-    console.log("Reply sent successfully");
   } catch (error) {
     console.error("Error processing message:", error);
-    // Make sure typing stops even on error
     await stopTyping(chatId).catch(() => {});
   }
 
   return NextResponse.json({ ok: true });
 }
 
-// Health check
 export async function GET() {
   return NextResponse.json({
     status: "ok",
     service: "linq-imessage-bot",
+    activeChats: chatHistory.size,
     timestamp: new Date().toISOString(),
   });
 }
