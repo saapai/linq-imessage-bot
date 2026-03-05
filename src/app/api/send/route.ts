@@ -26,7 +26,7 @@ export async function POST(request: NextRequest) {
     body: JSON.stringify({
       from: LINQ_PHONE_NUMBER,
       to: [to],
-      initial_message: {
+      message: {
         parts: [{ type: "text", value: message }],
       },
     }),
