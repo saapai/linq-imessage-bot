@@ -49,7 +49,12 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const data = JSON.parse(responseText);
+    let data;
+    try {
+      data = JSON.parse(responseText);
+    } catch {
+      return NextResponse.json({ success: true, raw: responseText });
+    }
     return NextResponse.json({ success: true, data });
   } catch (error) {
     return NextResponse.json(
