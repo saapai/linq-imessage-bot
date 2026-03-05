@@ -49,14 +49,69 @@ async function generateAIResponse(userMessage: string): Promise<string> {
   return completion.choices[0]?.message?.content || "Sorry, I couldn't generate a response.";
 }
 
+function linqHeaders() {
+  return {
+    Authorization: `Bearer ${process.env.LINQ_API_TOKEN}`,
+    "Content-Type": "application/json",
+    Accept: "application/json",
+  };
+}
+
+async function markAsRead(chatId: string) {
+  const response = await fetch(`${LINQ_BASE_URL}/chats/${chatId}/read`, {
+    method: "POST",
+    headers: linqHeaders(),
+  });
+  if (!response.ok) {
+    console.error("Failed to mark as read:", response.status, await response.text());
+  }
+}
+
+async function startTyping(chatId: string) {
+  const response = await fetch(`${LINQ_BASE_URL}/chats/${chatId}/typing`, {
+    method: "POST",
+    headers: linqHeaders(),
+  });
+  if (!response.ok) {
+    console.error("Failed to start typing:", response.status, await response.text());
+  }
+}
+
+async function stopTyping(chatId: string) {
+  const response = await fetch(`${LINQ_BASE_URL}/chats/${chatId}/typing`, {
+    method: "DELETE",
+    headers: linqHeaders(),
+  });
+  if (!response.ok) {
+    console.error("Failed to stop typing:", response.status, await response.text());
+  }
+}
+
+async function addReaction(messageId: string, reactionType: string) {
+  const response = await fetch(`${LINQ_BASE_URL}/messages/${messageId}/reactions`, {
+    method: "POST",
+    headers: linqHeaders(),
+    body: JSON.stringify({ operation: "add", type: reactionType }),
+  });
+  if (!response.ok) {
+    console.error("Failed to add reaction:", response.status, await response.text());
+  }
+}
+
+function pickReaction(message: string): string | null {
+  const lower = message.toLowerCase();
+  if (/\b(thanks|thank you|thx|ty)\b/.test(lower)) return "love";
+  if (/\b(haha|lol|lmao|rofl|😂|🤣)\b/.test(lower)) return "laugh";
+  if (/\b(wow|amazing|awesome|incredible|omg)\b/.test(lower)) return "emphasize";
+  if (/[?]{2,}|\b(what|huh|really)\b.*\?/.test(lower)) return "question";
+  if (/\b(nice|great|good|cool|👍)\b/.test(lower)) return "like";
+  return null;
+}
+
 async function sendLinqMessage(chatId: string, text: string) {
   const response = await fetch(`${LINQ_BASE_URL}/chats/${chatId}/messages`, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.LINQ_API_TOKEN}`,
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    },
+    headers: linqHeaders(),
     body: JSON.stringify({
       message: {
         parts: [{ type: "text", value: text }],
@@ -117,17 +172,34 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ ok: true });
   }
 
+  const messageId = data.id;
   console.log(`Incoming message from ${data.sender_handle?.handle}: "${userMessage}"`);
 
-  // Respond quickly to Linq, then process async
-  // Using waitUntil pattern for Vercel
   try {
+    // React to the message if appropriate
+    const reaction = pickReaction(userMessage);
+    if (reaction) {
+      await addReaction(messageId, reaction);
+      console.log(`Added ${reaction} reaction`);
+    }
+
+    // Mark chat as read
+    await markAsRead(chatId);
+
+    // Show typing indicator while generating response
+    await startTyping(chatId);
+
     const aiResponse = await generateAIResponse(userMessage);
     console.log(`AI response: "${aiResponse}"`);
+
+    // Stop typing and send the reply
+    await stopTyping(chatId);
     await sendLinqMessage(chatId, aiResponse);
     console.log("Reply sent successfully");
   } catch (error) {
     console.error("Error processing message:", error);
+    // Make sure typing stops even on error
+    await stopTyping(chatId).catch(() => {});
   }
 
   return NextResponse.json({ ok: true });
