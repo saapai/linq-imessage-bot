@@ -2,10 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { createHmac, timingSafeEqual } from "node:crypto";
 import OpenAI from "openai";
 
-const LINQ_API_TOKEN = process.env.LINQ_API_TOKEN!;
 const LINQ_BASE_URL = "https://api.linqapp.com/api/partner/v3";
-const LINQ_PHONE_NUMBER = process.env.LINQ_PHONE_NUMBER!;
-const WEBHOOK_SIGNING_SECRET = process.env.WEBHOOK_SIGNING_SECRET || "";
 
 function getOpenAI() {
   return new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -16,13 +13,14 @@ function verifySignature(
   sigHeader: string,
   tsHeader: string
 ): boolean {
-  if (!WEBHOOK_SIGNING_SECRET) return true; // skip if not configured yet
+  const secret = process.env.WEBHOOK_SIGNING_SECRET;
+  if (!secret) return true; // skip if not configured yet
 
   const ageMs = Date.now() - Number(tsHeader) * 1000;
   if (Math.abs(ageMs) > 5 * 60 * 1000) return false;
 
   const signedPayload = `${tsHeader}.${rawBody}`;
-  const expected = createHmac("sha256", WEBHOOK_SIGNING_SECRET)
+  const expected = createHmac("sha256", secret)
     .update(signedPayload)
     .digest("hex");
   const provided = sigHeader.startsWith("sha256=")
@@ -55,7 +53,7 @@ async function sendLinqMessage(chatId: string, text: string) {
   const response = await fetch(`${LINQ_BASE_URL}/chats/${chatId}/messages`, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${LINQ_API_TOKEN}`,
+      Authorization: `Bearer ${process.env.LINQ_API_TOKEN}`,
       "Content-Type": "application/json",
       Accept: "application/json",
     },
@@ -82,7 +80,7 @@ export async function POST(request: NextRequest) {
   const sigHeader = request.headers.get("x-webhook-signature") || "";
   const tsHeader = request.headers.get("x-webhook-timestamp") || "";
 
-  if (WEBHOOK_SIGNING_SECRET && !verifySignature(rawBody, sigHeader, tsHeader)) {
+  if (process.env.WEBHOOK_SIGNING_SECRET && !verifySignature(rawBody, sigHeader, tsHeader)) {
     console.error("Webhook signature verification failed");
     return NextResponse.json({ error: "Invalid signature" }, { status: 401 });
   }
