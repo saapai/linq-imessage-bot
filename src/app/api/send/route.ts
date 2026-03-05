@@ -1,45 +1,60 @@
 import { NextRequest, NextResponse } from "next/server";
 
-const LINQ_API_TOKEN = process.env.LINQ_API_TOKEN!;
 const LINQ_BASE_URL = "https://api.linqapp.com/api/partner/v3";
-const LINQ_PHONE_NUMBER = process.env.LINQ_PHONE_NUMBER!;
 
 // Manual endpoint to send a message (for testing)
 export async function POST(request: NextRequest) {
-  const { to, message } = await request.json();
+  try {
+    const { to, message } = await request.json();
 
-  if (!to || !message) {
-    return NextResponse.json(
-      { error: "Missing 'to' and 'message' fields" },
-      { status: 400 }
-    );
-  }
+    if (!to || !message) {
+      return NextResponse.json(
+        { error: "Missing 'to' and 'message' fields" },
+        { status: 400 }
+      );
+    }
 
-  // Create a chat and send message
-  const response = await fetch(`${LINQ_BASE_URL}/chats`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${LINQ_API_TOKEN}`,
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    },
-    body: JSON.stringify({
-      from: LINQ_PHONE_NUMBER,
-      to: [to],
-      message: {
-        parts: [{ type: "text", value: message }],
+    const token = process.env.LINQ_API_TOKEN;
+    const phoneNumber = process.env.LINQ_PHONE_NUMBER;
+
+    if (!token || !phoneNumber) {
+      return NextResponse.json(
+        { error: "Missing LINQ_API_TOKEN or LINQ_PHONE_NUMBER env vars" },
+        { status: 500 }
+      );
+    }
+
+    const response = await fetch(`${LINQ_BASE_URL}/chats`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
       },
-    }),
-  });
+      body: JSON.stringify({
+        from: phoneNumber,
+        to: [to],
+        message: {
+          parts: [{ type: "text", value: message }],
+        },
+      }),
+    });
 
-  if (!response.ok) {
-    const errorText = await response.text();
+    const responseText = await response.text();
+
+    if (!response.ok) {
+      return NextResponse.json(
+        { error: "Linq API error", status: response.status, details: responseText },
+        { status: response.status }
+      );
+    }
+
+    const data = JSON.parse(responseText);
+    return NextResponse.json({ success: true, data });
+  } catch (error) {
     return NextResponse.json(
-      { error: "Linq API error", details: errorText },
-      { status: response.status }
+      { error: "Internal error", message: String(error) },
+      { status: 500 }
     );
   }
-
-  const data = await response.json();
-  return NextResponse.json({ success: true, data });
 }
